@@ -135,6 +135,21 @@ class NeuralPoints(nn.Module):
 
         self.to(self.device)
 
+        self.imu_data = []
+        self.imu_timestamps = []
+
+    def add_imu_measurement(self, timestamp, linear_acceleration, angular_velocity, orientation, ypr=None):
+        self.imu_timestamps.append(timestamp)
+        self.imu_data.append(
+            {
+                "linear_acceleration": linear_acceleration,
+                "angular_velocity": angular_velocity,
+                "orientation": orientation,
+                "ypr": ypr, # yaw pitch roll
+            }
+        )
+    
+    
     def is_empty(self):
         return self.neural_points.shape[0] == 0
 
@@ -286,8 +301,17 @@ class NeuralPoints(nn.Module):
         sensor_position: torch.Tensor,
         sensor_orientation: torch.Tensor,
         cur_ts,
+        imu_data=None, # se agrega imu_data como input
     ):
-        # update the neural point map using new observations
+        # Se incorpora los datos IMU si están presentes
+        if imu_data is not None:
+            timestamp, acceleration, angular_velocity, orientation, ypr = imu_data
+            self.add_imu_measurement(timestamp, acceleration, angular_velocity, orientation, ypr)
+
+        if len(self.imu_data) > 0:
+            sensor_position, sensor_orientation = self.integrate_imu_date(sensor_position, sensor_orientation, cur_ts)
+
+        # update the neural point map using new observation
 
         cur_resolution = self.resolution
         # if self.mean_grid_sampling:
@@ -485,7 +509,12 @@ class NeuralPoints(nn.Module):
         query_geo_feature: bool = True,
         query_color_feature: bool = False,
     ):
+        # Add IMU-derived features
+        imu_features = self.get_imu_features(query_points, query_ts)
 
+        if query_geo_feature:
+            geo_features_vector = torch.cat([geo_features_vector, imu_features], dim= 1)
+        
         if not query_geo_feature and not query_color_feature:
             sys.exit("you need to at least query one kind of feature")
 
@@ -967,6 +996,54 @@ class NeuralPoints(nn.Module):
         )
 
         return o3d_bbx
+    
+    def integrate_imu_data(self, initial_position, initial_orientation, current_timestamp):
+        position = initial_position
+        orientation = initial_orientation
+
+        for i in range(len(self.imu_timestamps)):
+            if self.imu_timestamps[i] > current_timestamp:
+                break
+            dt = self.imu_timestamps[i] - (self.imu_timestamps[i-1] if i > 0 else current_timestamp)
+            acceleration, angular_velocity = self.imu_data[i]
+
+            # Integrate angular velocity to update orientation
+            orientation = self.integrate_angular_velocity(orientation, angular_velocity, dt)
+
+            # Remove gravity from acceleration using current orientation
+            acceleration = self.remove_gravity(acceleration, orientation)
+
+            # Integrate acceleration to update position
+            position = self.integrate_acceleration(position, acceleration, dt)
+
+        return position, orientation
+    
+    def integrate_angular_velocity(self, orientation, angular_velocity, dt):
+        # Implement quaternion integration here
+        # This is a simplified version and might need more sophisticated methods
+        quat_delta = torch.tensor([1, 0, 0, 0], device= self.device) + 0.5 * dt * torch.cat([torch.tensor([0]), angular_velocity])
+        return quat_multiply(orientation, quat_delta)
+    
+    def remove_gravity(self, acceleration, orientation):
+        # Rotate gravity vector by inverse of orientation and subtract from acceleration
+        gravity = torch.tensor([0, 0, -9.81], device=self.device)
+        rotated_gravity = apply_quaternion_rotation(orientation, gravity)
+        return acceleration - rotated_gravity
+    
+    def integrate_acceleration(self, position, acceleration, dt):
+        # Simple double integration
+        return position + 0.5 * acceleration * dt**2
+    
+
+    def get_imu_features(self, query_points, query_ts):
+        # Extract relevant IMU features based on query points and timestamps
+        # This is a placeholder and should be implemented based on the specific needs
+        return torch.zeros((query_points.shape[0], 6), device= self.device)
+    
+    
+
+
+
 
     # def feature_tsne(self):
     #     tsne = TSNE(n_components=3, perplexity=30, n_iter=300)
